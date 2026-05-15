@@ -1,0 +1,16 @@
+[package]
+name = "wrsf_cui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hound = "3.5.1"
+rand = "0.8.6"
+crossterm = "0.29.0"
+rfd = "0.17.2"
+
+[profile.release]
+opt-level = "2"
+lto = true
+panic = "abort"
+strip = true
