@@ -520,7 +520,7 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
     // REM: 以降、処理のためカーソルを非表示
     execute!(io::stdout(), Hide).map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
-    println!("\n\n<< Wav Retro Sound Filter v0.2 >>");
+    println!("\n\n<< Wav Retro Sound Filter v0.2.1 >>");
 
     // REM: Section 1. 初期処理（リサンプリング & RMS）
     // REM: 入力されたwavを下処理
