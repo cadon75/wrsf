@@ -9,7 +9,8 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::{
     env,
     error::Error,
-    io::{self, IsTerminal, Write},
+    fs,
+    io::{self, Cursor, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -222,13 +223,10 @@ fn select_consumer_filter() -> AppResult<String> {
     loop {
         let mut usr_input2 = String::new();
         io::stdin().read_line(&mut usr_input2)?;
-
         let usr_input2 = usr_input2.trim().to_string();
-
         if usr_input2.is_empty() {
             return Ok("1".to_string());
         }
-
         if ["1", "2", "3", "4", "5"].contains(&usr_input2.as_str()) {
             return Ok(usr_input2);
         }
@@ -236,10 +234,16 @@ fn select_consumer_filter() -> AppResult<String> {
 }
 
 // REM: WAV処理のメイン（ほぼ本体）
-fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -> AppResult<()> {
-    let arg_in_active = arg_input_path.is_some();
+fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>, piped_data: Option<Vec<u8>>) -> AppResult<()> {
+    let is_pipe_mode = piped_data.is_some();
+    let arg_in_active = arg_input_path.is_some() || is_pipe_mode;
+
+    // REM: 引数あり ＞ パイプのみ ＞ 引数なしGUI の順で解決
     let in_path_buf = if let Some(p) = arg_input_path {
         p
+    } else if is_pipe_mode {
+        // REM: パイプ用ダミー
+        PathBuf::from("Pipe_sound.wav")
     } else {
         println!("読み込むwavファイルを選択して下さい");
         println!("(Please enter the path to the wav file to load)");
@@ -251,15 +255,46 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
     };
 
     let in_path = in_path_buf.as_path();
-    if in_path.extension().map_or(true, |ext| ext.to_ascii_lowercase() != "wav") {
-        show_message("Only WAV files are supported");
+
+    // REM: 色々チェック
+    let ext = in_path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    if is_pipe_mode {
+        let valid_pipe_extensions = ["wav", "vgm", "vgz"];
+        if !valid_pipe_extensions.contains(&ext.as_str()) {
+            show_message("\nUnsupported file extension for pipe input.");
+            return Ok(());
+        }
+        if ext == "wav" && in_path.file_name().unwrap_or_default() != "Pipe_sound.wav" {
+            show_message("\nAmbiguous input: Both file path and pipe stream provided.");
+            return Ok(());
+        }
+    } else {
+        // 通常時
+        if ext != "wav" {
+            show_message("Unsupported file extension.");
+            return Ok(());
+        }
+    }
+
+    // REM: ファイルまたはパイプからWAVデータをメモリ上のバッファに取得
+    let wav_buffer = if let Some(data) = piped_data {
+        println!("\nLoaded Data from pipe.");
+        data
+    } else {
+        fs::read(in_path).map_err(|e| format!("File read error: {}", e))?
+    };
+
+    // REM: WAVヘッダの確認
+    if wav_buffer.len() < 12 || &wav_buffer[0..4] != b"RIFF" || &wav_buffer[8..12] != b"WAVE" {
+        show_message("\nInvalid WAV signature.");
         return Ok(());
     }
 
-    let mut reader = match WavReader::open(in_path) {
+    // REM: メモリ上のバッファをWavReaderに渡す
+    let mut reader = match WavReader::new(Cursor::new(wav_buffer)) {
         Ok(r) => r,
         Err(e) => {
-            show_message(&format!("Only WAV files are supported or file could not be opened: {}", e));
+            show_message(&format!("\nOnly WAV files are supported or file could not be opened: {}", e));
             return Ok(());
         }
     };
@@ -277,7 +312,7 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
         }
     };
     let framerate = spec.sample_rate;
-    let _n_frames = reader.len() as u32 / (sampwidth as u32 * n_channels as u32);
+    let _n_frames = reader.len() / n_channels as u32;
 
     if n_channels != 2 {
         show_message("Only 2ch-Stereo is supported");
@@ -305,10 +340,7 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
 
             for s in reader.samples::<i32>() {
                 let raw_s = s? as f64;
-                let mut val = raw_s / max_val;
-                if val.abs() > 1.0 {
-                    val = raw_s / 2147483647.0;
-                }
+                let val = raw_s / max_val;
                 samples.push(val.clamp(-1.0, 1.0));
             }
         }
@@ -520,7 +552,7 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
     // REM: 以降、処理のためカーソルを非表示
     execute!(io::stdout(), Hide).map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
-    println!("\n\n<< Wav Retro Sound Filter v0.2.1 >>");
+    println!("\n\n<< Wav Retro Sound Filter v0.2.2 >>");
 
     // REM: Section 1. 初期処理（リサンプリング & RMS）
     // REM: 入力されたwavを下処理
@@ -1333,7 +1365,7 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
     // REM: Section 8. 保存処理 (自動命名・上書き確認)
     println!("\n");
     let base_name = in_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    let ext_name = in_path.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+    let ext_name = "wav";
     let output_file_name = format!("{}_Processed.{}", base_name, ext_name);
     let output_dir = in_path.parent().unwrap_or_else(|| Path::new("."));
     let output_path: PathBuf = output_dir.join(output_file_name);
@@ -1413,6 +1445,16 @@ fn wav_process_main(arg_input_path: Option<PathBuf>, arg_mode: Option<String>) -
 fn main() -> AppResult<()> {
     check_terminal();
 
+    // REM: パイプ入力の自動検出とバッファ処理
+    let mut piped_data: Option<Vec<u8>> = None;
+    if !io::stdin().is_terminal() {
+        let mut buffer = Vec::new();
+        io::stdin().read_to_end(&mut buffer).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        if !buffer.is_empty() {
+            piped_data = Some(buffer);
+        }
+    }
+
     // REM: コマンドライン引数解析
     // REM: 引数ありの挙動は表示しないで入力を内部で入れてるだけなので
     // REM: 挙動を変えたい場合は増設なりの対処が必要
@@ -1445,19 +1487,19 @@ fn main() -> AppResult<()> {
         }
     }
 
-    // REM: オプション未指定時は-1扱い
-    if arg_input_path.is_some() && cl_mode.is_none() {
+    // REM: パイプ入力時と通常ファイル名引数時のみでオプション未指定時は-1を入れる
+    if (arg_input_path.is_some() || piped_data.is_some()) && cl_mode.is_none() {
         cl_mode = Some("1".to_string());
     }
 
-    let result = wav_process_main(arg_input_path, cl_mode);
+    let result = wav_process_main(arg_input_path, cl_mode, piped_data);
 
-    // REM: 処理終了時にカーソルを表示に戻す
-    execute!(io::stdout(), Show).map_err(|e| Box::new(e) as Box<dyn Error>)?;
-    io::stdout().flush().map_err(|e| Box::new(e) as Box<dyn Error>)?;
-
-    if let Err(e) = result {
+    // REM: エラー表示
+    if let Err(ref e) = result {
         eprintln!("\nProcessing interrupted or error\n {}\n", e);
     }
-    Ok(())
+    // REM: 処理終了時にカーソルを表示に戻す
+    let _ = execute!(io::stdout(), Show);
+    let _ = io::stdout().flush();
+    result
 }
